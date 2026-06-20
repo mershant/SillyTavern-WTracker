@@ -14,3 +14,17 @@ export function isLocalOpenAIEndpoint(url: string): boolean {
     url,
   );
 }
+
+export function normalizeOpenAIMessageContent(content: unknown): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (content === undefined || content === null) {
+    return '';
+  }
+  try {
+    return JSON.stringify(content);
+  } catch {
+    return String(content);
+  }
+}

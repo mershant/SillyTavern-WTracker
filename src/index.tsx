@@ -10,7 +10,7 @@ import { ExtensionSettings, PromptEngineeringMode, EXTENSION_KEY, extensionName 
 import { parseResponse } from './parser.js';
 import { schemaToExample } from './schema-to-example.js';
 import { buildModeSequence, runWithRetry } from './generation.js';
-import { buildOpenAIChatCompletionsUrl, isLocalOpenAIEndpoint } from './openai-compat.js';
+import { buildOpenAIChatCompletionsUrl, isLocalOpenAIEndpoint, normalizeOpenAIMessageContent } from './openai-compat.js';
 import {
   deleteTrackerForActiveSwipe,
   getTrackerForActiveSwipe,
@@ -241,9 +241,9 @@ function buildDirectOpenAIBaseMessages(id: number, settings: ExtensionSettings):
 
 function toOpenAIMessages(requestMessages: Message[]): Array<{ role: string; content: string }> {
   return requestMessages
-    .map((message) => ({
-      role: (message.role ?? 'user') as string,
-      content: typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
+    .map((message: any) => ({
+      role: (message.role ?? (message.is_user ? 'user' : 'assistant') ?? 'user') as string,
+      content: normalizeOpenAIMessageContent(message.content ?? message.mes),
     }))
     .filter((message) => message.content.trim().length > 0);
 }

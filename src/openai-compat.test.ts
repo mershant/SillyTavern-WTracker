@@ -1,4 +1,4 @@
-import { buildOpenAIChatCompletionsUrl, isLocalOpenAIEndpoint } from './openai-compat.js';
+import { buildOpenAIChatCompletionsUrl, isLocalOpenAIEndpoint, normalizeOpenAIMessageContent } from './openai-compat.js';
 
 describe('buildOpenAIChatCompletionsUrl', () => {
   test('appends chat completions to a /v1 base url', () => {
@@ -22,5 +22,19 @@ describe('isLocalOpenAIEndpoint', () => {
 
   test('does not treat cloud endpoints as local', () => {
     expect(isLocalOpenAIEndpoint('https://api.openai.com/v1/chat/completions')).toBe(false);
+  });
+});
+
+describe('normalizeOpenAIMessageContent', () => {
+  test('returns string content unchanged', () => {
+    expect(normalizeOpenAIMessageContent('hello')).toBe('hello');
+  });
+
+  test('converts undefined to empty string instead of throwing later', () => {
+    expect(normalizeOpenAIMessageContent(undefined)).toBe('');
+  });
+
+  test('stringifies non-string values safely', () => {
+    expect(normalizeOpenAIMessageContent({ a: 1 })).toBe('{"a":1}');
   });
 });
