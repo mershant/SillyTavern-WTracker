@@ -10,6 +10,12 @@ import { ExtensionSettings, PromptEngineeringMode, EXTENSION_KEY, extensionName 
 import { parseResponse } from './parser.js';
 import { schemaToExample } from './schema-to-example.js';
 import { buildModeSequence, runWithRetry } from './generation.js';
+import {
+  deleteTrackerForActiveSwipe,
+  getTrackerForActiveSwipe,
+  setTrackerForActiveSwipe,
+  shouldAutoGenerateForRenderType,
+} from './tracker-state.js';
 import * as Handlebars from 'handlebars';
 import { POPUP_RESULT, POPUP_TYPE } from 'sillytavern-utils-lib/types/popup';
 
@@ -40,16 +46,18 @@ function renderTracker(messageId: number) {
   const messageBlock = document.querySelector(`.mes[mesid="${messageId}"]`);
   messageBlock?.querySelector('.mes_wtracker')?.remove();
 
-  if (!message?.extra?.[EXTENSION_KEY]) return;
+  const tracker = getTrackerForActiveSwipe(message);
+  if (!tracker) return;
 
-  const trackerData = message.extra[EXTENSION_KEY][CHAT_MESSAGE_SCHEMA_VALUE_KEY];
-  const trackerHtmlSchema = message.extra[EXTENSION_KEY][CHAT_MESSAGE_SCHEMA_HTML_KEY];
+  const trackerData = tracker.value;
+  const trackerHtmlSchema = tracker.html;
   if (!trackerData || !trackerHtmlSchema) return;
 
   if (!messageBlock) return;
 
   const template = Handlebars.compile(trackerHtmlSchema, { noEscape: true, strict: true });
   const renderedHtml = template({ data: trackerData });
+
   const container = document.createElement('div');
   container.className = 'mes_wtracker';
   container.innerHTML = renderedHtml;
@@ -68,64 +76,77 @@ function renderTracker(messageId: number) {
 }
 
 function includeWTrackerMessages<T extends Message | ChatMessage>(messages: T[], settings: ExtensionSettings): T[] {
-  let copyMessages = structuredClone(messages);
-  if (settings.includeLastXWTrackerMessages > 0) {
-    for (let i = 0; i < settings.includeLastXWTrackerMessages; i++) {
-      let foundMessage: T | null = null;
-      let foundIndex = -1;
-      for (let j = copyMessages.length - 2; j >= 0; j--) {
-        // -2 to skip current message
-        const message = copyMessages[j];
-        const extra = 'source' in message ? (message as Message).source?.extra : (message as ChatMessage).extra;
+  const copyMessages = structuredClone(messages);
+  if (settings.includeLastXWTrackerMessages <= 0) {
+    return copyMessages;
+  }
+
+  for (let i = 0; i < settings.includeLastXWTrackerMessages; i++) {
+    let foundMessage: T | null = null;
+    let foundIndex = -1;
+
+    for (let j = copyMessages.length - 2; j >= 0; j--) {
+      const message = copyMessages[j];
+      const sourceMessage = 'source' in message ? (message as Message).source : (message as ChatMessage);
+      const tracker = getTrackerForActiveSwipe(sourceMessage);
+      // @ts-ignore
+      if (!message.wTrackerFound && tracker?.value) {
         // @ts-ignore
-        if (!message.wTrackerFound && extra?.[EXTENSION_KEY]?.[CHAT_MESSAGE_SCHEMA_VALUE_KEY]) {
-          // @ts-ignore
-          message.wTrackerFound = true;
-          foundMessage = message;
-          foundIndex = j;
-          break;
-        }
-      }
-      if (foundMessage) {
-        const extra =
-          'source' in foundMessage ? (foundMessage as Message).source?.extra : (foundMessage as ChatMessage).extra;
-        const content = `Tracker:\n\`\`\`json\n${JSON.stringify(extra?.[EXTENSION_KEY]?.[CHAT_MESSAGE_SCHEMA_VALUE_KEY] || '{}', null, 2)}\n\`\`\``;
-        copyMessages.splice(foundIndex + 1, 0, {
-          content,
-          role: 'user',
-          name: name1,
-          is_user: true,
-          mes: content,
-          is_system: false,
-        } as unknown as T);
+        message.wTrackerFound = true;
+        foundMessage = message;
+        foundIndex = j;
+        break;
       }
     }
+
+    if (!foundMessage) {
+      continue;
+    }
+
+    const sourceMessage = 'source' in foundMessage ? (foundMessage as Message).source : (foundMessage as ChatMessage);
+    const tracker = getTrackerForActiveSwipe(sourceMessage);
+    const content = `Tracker:\n\`\`\`json\n${JSON.stringify(tracker?.value || '{}', null, 2)}\n\`\`\``;
+
+    copyMessages.splice(
+      foundIndex + 1,
+      0,
+      {
+        content,
+        role: 'user',
+        name: name1,
+        is_user: true,
+        mes: content,
+        is_system: false,
+      } as unknown as T,
+    );
   }
+
   return copyMessages;
 }
 
 async function deleteTracker(messageId: number) {
   const message = globalContext.chat[messageId];
-  if (!message?.extra?.[EXTENSION_KEY]) return;
+  if (!getTrackerForActiveSwipe(message)) return;
 
   const confirm = await globalContext.Popup.show.confirm(
     'Delete Tracker',
-    'Are you sure you want to delete the tracker data for this message? This cannot be undone.',
+    'Are you sure you want to delete the tracker data for this swipe? This cannot be undone.',
   );
 
   if (confirm) {
-    delete message.extra[EXTENSION_KEY];
+    deleteTrackerForActiveSwipe(message);
     await globalContext.saveChat();
-    renderTracker(messageId); // This will remove the rendered tracker
-    st_echo('success', 'Tracker data deleted.');
+    renderTracker(messageId);
+    st_echo('success', 'Tracker data deleted for this swipe.');
   }
 }
 
 async function editTracker(messageId: number) {
   const message = globalContext.chat[messageId];
-  if (!message?.extra?.[EXTENSION_KEY]?.[CHAT_MESSAGE_SCHEMA_VALUE_KEY]) return;
+  const tracker = getTrackerForActiveSwipe(message);
+  if (!tracker?.value) return;
 
-  const currentData = message.extra[EXTENSION_KEY][CHAT_MESSAGE_SCHEMA_VALUE_KEY];
+  const currentData = tracker.value;
 
   const popupContent = `
         <div style="display: flex; flex-direction: column; gap: 8px;">
@@ -142,15 +163,17 @@ async function editTracker(messageId: number) {
         if (textarea) {
           try {
             const newData = JSON.parse(textarea.value);
-            // @ts-ignore
-            message.extra[EXTENSION_KEY][CHAT_MESSAGE_SCHEMA_VALUE_KEY] = newData;
+            setTrackerForActiveSwipe(message, { value: newData, html: tracker.html });
             await globalContext.saveChat();
             let detailsState: boolean[] = [];
             const messageBlock = document.querySelector(`.mes[mesid="${messageId}"]`);
             const existingTracker = messageBlock?.querySelector('.mes_wtracker');
+
             if (existingTracker) {
               const detailsElements = existingTracker.querySelectorAll('details');
-              detailsState = Array.from(detailsElements).map((detail) => detail.open);
+              detailsState = Array.from(detailsElements).map(
+                (detail) => (detail as HTMLDetailsElement).open,
+              );
             }
             renderTracker(messageId);
             if (detailsState.length > 0) {
@@ -158,9 +181,8 @@ async function editTracker(messageId: number) {
               if (newTracker) {
                 const newDetailsElements = newTracker.querySelectorAll('details');
                 newDetailsElements.forEach((detail, index) => {
-                  // Safety check: only apply if a state for this index exists
                   if (detailsState[index] !== undefined) {
-                    detail.open = detailsState[index];
+                    (detail as HTMLDetailsElement).open = detailsState[index];
                   }
                 });
               }
@@ -285,7 +307,7 @@ async function generateTracker(id: number) {
   const existingTracker = messageBlock?.querySelector('.mes_wtracker');
   if (existingTracker) {
     const detailsElements = existingTracker.querySelectorAll('details');
-    detailsState = Array.from(detailsElements).map((detail) => detail.open);
+    detailsState = Array.from(detailsElements).map((detail) => (detail as HTMLDetailsElement).open);
   }
 
   const abortController = new AbortController();
@@ -328,10 +350,7 @@ async function generateTracker(id: number) {
       st_echo('info', `WTracker native mode fell back to ${modeUsed.toUpperCase()} after ${attempts} attempt(s).`);
     }
 
-    message.extra = message.extra || {};
-    message.extra[EXTENSION_KEY] = message.extra[EXTENSION_KEY] || {};
-    message.extra[EXTENSION_KEY][CHAT_MESSAGE_SCHEMA_VALUE_KEY] = response;
-    message.extra[EXTENSION_KEY][CHAT_MESSAGE_SCHEMA_HTML_KEY] = chatHtmlValue;
+    setTrackerForActiveSwipe(message, { value: response, html: chatHtmlValue });
 
     try {
       renderTracker(id);
@@ -350,7 +369,7 @@ async function generateTracker(id: number) {
 
       await saveChat();
     } catch {
-      delete message.extra[EXTENSION_KEY];
+      deleteTrackerForActiveSwipe(message);
       renderTracker(id);
       throw new Error('Generated data failed to render with the current template. Not saved.');
     }
@@ -414,12 +433,17 @@ async function initializeGlobalUI() {
   const settings = settingsManager.getSettings();
   globalContext.eventSource.on(
     EventNames.CHARACTER_MESSAGE_RENDERED,
-    (messageId: number) => incomingTypes.includes(settings.autoMode) && generateTracker(messageId),
+    (messageId: number, type?: string) =>
+      incomingTypes.includes(settings.autoMode) && shouldAutoGenerateForRenderType(type) && generateTracker(messageId),
   );
   globalContext.eventSource.on(
     EventNames.USER_MESSAGE_RENDERED,
-    (messageId: number) => outgoingTypes.includes(settings.autoMode) && generateTracker(messageId),
+    (messageId: number, type?: string) =>
+      outgoingTypes.includes(settings.autoMode) && shouldAutoGenerateForRenderType(type) && generateTracker(messageId),
   );
+  globalContext.eventSource.on(EventNames.MESSAGE_SWIPED, (messageId: number) => {
+    renderTracker(messageId);
+  });
   globalContext.eventSource.on(EventNames.CHAT_CHANGED, () => {
     const { saveChat } = globalContext;
     let chatModified = false;
@@ -427,10 +451,10 @@ async function initializeGlobalUI() {
       try {
         renderTracker(i);
       } catch (error) {
-        console.error(`Error rendering WTracker on message ${i}, removing data:`, error);
-        st_echo('error', 'A WTracker template failed to render. Removing tracker from the message.');
-        if (message?.extra?.[EXTENSION_KEY]) {
-          delete message.extra[EXTENSION_KEY];
+        console.error(`Error rendering WTracker on message ${i}, removing active swipe tracker:`, error);
+        st_echo('error', 'A WTracker template failed to render. Removing tracker from the active swipe.');
+        if (getTrackerForActiveSwipe(message)) {
+          deleteTrackerForActiveSwipe(message);
           chatModified = true;
         }
       }
