@@ -29,14 +29,25 @@ A [SillyTavern](https://docs.sillytavern.app/) extension that helps you track yo
 Install via the SillyTavern extension installer:
 
 ```txt
-https://github.com/bmen25124/SillyTavern-WTracker
+https://github.com/mershant/SillyTavern-WTracker
 ```
 
 ## FAQ
 
->I'm having API error.
+> I'm having API error.
 
-Your API/model might not support structured output. Change `Prompt Engineering` mode from `Native API` to `JSON` or `XML`.
+This repo now defaults to **Simple Generation (JSON)** instead of native structured output, which is more compatible with providers that only support ordinary generation.
+
+If you still have issues:
+
+- keep **Generation Mode** on `Simple Generation (JSON)`
+- increase **Retry Attempts** if the model occasionally returns malformed output
+- enable **Auto fallback from Native Structured Output to Simple JSON** if you want to keep native mode available but not brittle
+- use `Simple Generation (XML)` only if your provider consistently formats XML better than JSON
+
+> Why does native mode fail more often?
+
+Native mode depends on provider/backend support for strict structured output. Many OpenAI-compatible providers reject or mishandle schema-enforced requests even when plain chat generation works fine.
 
 > What is the difference compared to [famous tracker](https://github.com/kaldigo/SillyTavern-Tracker)?
 

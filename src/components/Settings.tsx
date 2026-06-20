@@ -176,7 +176,7 @@ export const WTrackerSettings: FC = () => {
             </div>
 
             <div className="setting-row">
-              <label>Prompt Engineering</label>
+              <label>Generation Mode</label>
               <select
                 className="text_pole"
                 value={settings.promptEngineeringMode}
@@ -186,10 +186,43 @@ export const WTrackerSettings: FC = () => {
                   })
                 }
               >
-                <option value="native">Native API</option>
-                <option value="json">Prompt Engineering (JSON)</option>
-                <option value="xml">Prompt Engineering (XML)</option>
+                <option value="json">Simple Generation (JSON)</option>
+                <option value="xml">Simple Generation (XML)</option>
+                <option value="native">Native Structured Output</option>
               </select>
+            </div>
+
+            <div className="setting-row">
+              <label>Retry Attempts</label>
+              <input
+                type="number"
+                className="text_pole"
+                min="0"
+                step="1"
+                value={settings.retryCount}
+                onChange={(e) =>
+                  updateAndRefresh((s) => {
+                    s.retryCount = Math.max(0, parseInt(e.target.value) || 0);
+                  })
+                }
+              />
+              <small>Retries after the first failed generation. Default 2.</small>
+            </div>
+
+            <div className="setting-row">
+              <label className="checkbox_label" htmlFor="wtracker-fallback-native-json">
+                <input
+                  id="wtracker-fallback-native-json"
+                  type="checkbox"
+                  checked={settings.fallbackNativeToJson}
+                  onChange={(e) =>
+                    updateAndRefresh((s) => {
+                      s.fallbackNativeToJson = e.target.checked;
+                    })
+                  }
+                />
+                Auto fallback from Native Structured Output to Simple JSON
+              </label>
             </div>
 
             <div className="setting-row">

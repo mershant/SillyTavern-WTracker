@@ -19,6 +19,7 @@ export interface ExtensionSettings {
   formatVersion: string;
   profileId: string;
   maxResponseToken: number;
+  retryCount: number;
   autoMode: AutoModeOptions;
   schemaPreset: string;
   schemaPresets: Record<string, Schema>;
@@ -26,6 +27,7 @@ export interface ExtensionSettings {
   includeLastXMessages: number; // 0 means all messages
   includeLastXWTrackerMessages: number; // 0 means none
   promptEngineeringMode: PromptEngineeringMode;
+  fallbackNativeToJson: boolean;
   promptRole: PromptSenderRole;
   promptJson: string;
   promptXml: string;
@@ -262,6 +264,7 @@ export const defaultSettings: ExtensionSettings = {
   formatVersion: FORMAT_VERSION,
   profileId: '',
   maxResponseToken: 16000,
+  retryCount: 2,
   autoMode: AutoModeOptions.NONE,
   schemaPreset: 'default',
   schemaPresets: {
@@ -274,7 +277,8 @@ export const defaultSettings: ExtensionSettings = {
   prompt: DEFAULT_PROMPT,
   includeLastXMessages: 0,
   includeLastXWTrackerMessages: 1,
-  promptEngineeringMode: PromptEngineeringMode.NATIVE,
+  promptEngineeringMode: PromptEngineeringMode.JSON,
+  fallbackNativeToJson: true,
   promptRole: 'user',
   promptJson: DEFAULT_PROMPT_JSON,
   promptXml: DEFAULT_PROMPT_XML,

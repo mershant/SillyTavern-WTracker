@@ -2,13 +2,14 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { settingsManager, WTrackerSettings } from './components/Settings.js';
 
-import { buildPrompt, Message, Generator } from 'sillytavern-utils-lib';
-import { ChatMessage, EventNames, ExtractedData } from 'sillytavern-utils-lib/types';
-import { characters, name1, selected_group, st_echo } from 'sillytavern-utils-lib/config';
+import { buildPrompt, Message } from 'sillytavern-utils-lib';
+import { ChatMessage, EventNames } from 'sillytavern-utils-lib/types';
+import { characters, name1, st_echo } from 'sillytavern-utils-lib/config';
 import { AutoModeOptions } from 'sillytavern-utils-lib/types/translate';
 import { ExtensionSettings, PromptEngineeringMode, EXTENSION_KEY, extensionName } from './config.js';
 import { parseResponse } from './parser.js';
 import { schemaToExample } from './schema-to-example.js';
+import { buildModeSequence, runWithRetry } from './generation.js';
 import * as Handlebars from 'handlebars';
 import { POPUP_RESULT, POPUP_TYPE } from 'sillytavern-utils-lib/types/popup';
 
@@ -18,8 +19,7 @@ const CHAT_MESSAGE_SCHEMA_VALUE_KEY = 'value';
 const CHAT_MESSAGE_SCHEMA_HTML_KEY = 'html';
 
 const globalContext = SillyTavern.getContext();
-const generator = new Generator();
-const pendingRequests = new Map<number, string>();
+const pendingRequests = new Map<number, AbortController>();
 const incomingTypes = [AutoModeOptions.RESPONSES, AutoModeOptions.BOTH];
 const outgoingTypes = [AutoModeOptions.INPUT, AutoModeOptions.BOTH];
 
@@ -180,13 +180,82 @@ async function editTracker(messageId: number) {
   }
 }
 
+function buildPromptForMode(
+  baseMessages: Message[],
+  settings: ExtensionSettings,
+  mode: PromptEngineeringMode,
+  chatJsonValue: object,
+): { messages: Message[]; overridePayload?: Record<string, any> } {
+  const messages = structuredClone(baseMessages);
+  const promptRole = settings.promptRole ?? 'user';
+
+  if (mode === PromptEngineeringMode.NATIVE) {
+    messages.push({ content: settings.prompt, role: promptRole });
+    return {
+      messages,
+      overridePayload: {
+        json_schema: { name: 'SceneTracker', strict: true, value: chatJsonValue },
+      },
+    };
+  }
+
+  const format = mode as 'json' | 'xml';
+  const promptTemplate = format === 'json' ? settings.promptJson : settings.promptXml;
+  const exampleResponse = schemaToExample(chatJsonValue, format);
+  const finalPrompt = Handlebars.compile(promptTemplate, { noEscape: true, strict: true })({
+    schema: JSON.stringify(chatJsonValue, null, 2),
+    example_response: exampleResponse,
+  });
+  messages.push({ content: finalPrompt, role: promptRole });
+  return { messages };
+}
+
+async function requestTrackerGeneration(
+  id: number,
+  settings: ExtensionSettings,
+  requestMessages: Message[],
+  overridePayload?: Record<string, any>,
+): Promise<any> {
+  const abortController = pendingRequests.get(id);
+  if (!abortController) {
+    throw new DOMException('Request aborted by user', 'AbortError');
+  }
+
+  const result = await globalContext.ConnectionManagerRequestService.sendRequest(
+    settings.profileId,
+    requestMessages,
+    settings.maxResponseToken,
+    {
+      stream: false,
+      extractData: true,
+      includePreset: true,
+      includeInstruct: true,
+      signal: abortController.signal,
+    },
+    overridePayload || {},
+  );
+
+  return result;
+}
+
+function parseTrackerResponse(result: any, mode: PromptEngineeringMode, chatJsonValue: object) {
+  if (mode === PromptEngineeringMode.NATIVE) {
+    return result?.content;
+  }
+
+  if (!result?.content) {
+    throw new Error('No response content received.');
+  }
+
+  return parseResponse(result.content, mode as 'json' | 'xml', { schema: chatJsonValue });
+}
+
 async function generateTracker(id: number) {
   const message = globalContext.chat[id];
   if (!message) return st_echo('error', `Message with ID ${id} not found.`);
 
   if (pendingRequests.has(id)) {
-    const requestId = pendingRequests.get(id)!;
-    generator.abortRequest(requestId);
+    pendingRequests.get(id)?.abort();
     st_echo('info', 'Tracker generation cancelled.');
     return;
   }
@@ -196,7 +265,6 @@ async function generateTracker(id: number) {
   const context = SillyTavern.getContext();
   const chatMetadata = context.chatMetadata;
   const { extensionSettings, CONNECT_API_MAP, saveChat } = globalContext;
-  // Ensure chat metadata is initialized
   chatMetadata[EXTENSION_KEY] = chatMetadata[EXTENSION_KEY] || {};
   chatMetadata[EXTENSION_KEY][CHAT_METADATA_SCHEMA_PRESET_KEY] =
     chatMetadata[EXTENSION_KEY][CHAT_METADATA_SCHEMA_PRESET_KEY] || settings.schemaPreset;
@@ -219,6 +287,10 @@ async function generateTracker(id: number) {
     const detailsElements = existingTracker.querySelectorAll('details');
     detailsState = Array.from(detailsElements).map((detail) => detail.open);
   }
+
+  const abortController = new AbortController();
+  pendingRequests.set(id, abortController);
+
   try {
     mainButton?.classList.add('spinning');
     regenerateButton?.classList.add('spinning');
@@ -233,71 +305,29 @@ async function generateTracker(id: number) {
       contextName: profile?.context,
       instructName: profile?.instruct,
       syspromptName: profile?.sysprompt,
-      includeNames: !!selected_group,
+      includeNames: !!((globalContext as any).groupId),
     });
-    let messages = includeWTrackerMessages(promptResult.result, settings);
-    let response: ExtractedData['content'];
+    const baseMessages = includeWTrackerMessages(promptResult.result, settings);
+    const modeSequence = buildModeSequence(settings.promptEngineeringMode, settings.fallbackNativeToJson);
 
-    const makeRequest = (requestMessages: Message[], overideParams?: any): Promise<ExtractedData | undefined> => {
-      return new Promise((resolve, reject) => {
-        const abortController = new AbortController();
-        generator.generateRequest(
-          {
-            profileId: settings.profileId,
-            prompt: requestMessages,
-            maxTokens: settings.maxResponseToken,
-            custom: { signal: abortController.signal },
-            overridePayload: {
-              ...overideParams,
-            },
-          },
-          {
-            abortController,
-            onStart: (requestId) => {
-              pendingRequests.set(id, requestId);
-            },
-            onFinish: (requestId, data, error) => {
-              pendingRequests.delete(id);
-              if (error) {
-                return reject(error);
-              }
-              if (!data) {
-                // This is how Generator signals cancellation without an error object
-                return reject(new DOMException('Request aborted by user', 'AbortError'));
-              }
-              resolve(data as ExtractedData | undefined);
-            },
-          },
-        );
-      });
-    };
+    const { value: response, modeUsed, attempts } = await runWithRetry(
+      modeSequence,
+      settings.retryCount,
+      async (mode) => {
+        const { messages, overridePayload } = buildPromptForMode(baseMessages, settings, mode, chatJsonValue);
+        const result = await requestTrackerGeneration(id, settings, messages, overridePayload);
+        const parsed = parseTrackerResponse(result, mode, chatJsonValue);
+        if (!parsed || Object.keys(parsed as any).length === 0) {
+          throw new Error('Empty response from WTracker.');
+        }
+        return parsed;
+      },
+    );
 
-    const promptRole = settings.promptRole ?? 'user';
-    if (settings.promptEngineeringMode === PromptEngineeringMode.NATIVE) {
-      messages.push({ content: settings.prompt, role: promptRole });
-      const result = await makeRequest(messages, {
-        json_schema: { name: 'SceneTracker', strict: true, value: chatJsonValue },
-      });
-      // @ts-ignore
-      response = result?.content;
-    } else {
-      const format = settings.promptEngineeringMode as 'json' | 'xml';
-      const promptTemplate = format === 'json' ? settings.promptJson : settings.promptXml;
-      const exampleResponse = schemaToExample(chatJsonValue, format);
-      const finalPrompt = Handlebars.compile(promptTemplate, { noEscape: true, strict: true })({
-        schema: JSON.stringify(chatJsonValue, null, 2),
-        example_response: exampleResponse,
-      });
-      messages.push({ content: finalPrompt, role: promptRole });
-      const rest = await makeRequest(messages);
-      if (!rest?.content) throw new Error('No response content received.');
-      // @ts-ignore
-      response = parseResponse(rest.content, format, { schema: chatJsonValue });
+    if (modeUsed !== settings.promptEngineeringMode) {
+      st_echo('info', `WTracker native mode fell back to ${modeUsed.toUpperCase()} after ${attempts} attempt(s).`);
     }
 
-    if (!response || Object.keys(response as any).length === 0) throw new Error('Empty response from WTracker.');
-
-    // Tentatively update message and try to render
     message.extra = message.extra || {};
     message.extra[EXTENSION_KEY] = message.extra[EXTENSION_KEY] || {};
     message.extra[EXTENSION_KEY][CHAT_MESSAGE_SCHEMA_VALUE_KEY] = response;
@@ -311,7 +341,6 @@ async function generateTracker(id: number) {
         if (newTracker) {
           const newDetailsElements = newTracker.querySelectorAll('details');
           newDetailsElements.forEach((detail, index) => {
-            // Safety check: only apply if a state for this index exists
             if (detailsState[index] !== undefined) {
               detail.open = detailsState[index];
             }
@@ -319,15 +348,11 @@ async function generateTracker(id: number) {
         }
       }
 
-      // If render succeeds, save the chat
       await saveChat();
-    } catch (renderError) {
-      // If render fails, remove the tracker data we just added
+    } catch {
       delete message.extra[EXTENSION_KEY];
-      // Re-render to clear the failed attempt from the DOM
       renderTracker(id);
-      // Let the outer catch block show the error to the user
-      throw new Error(`Generated data failed to render with the current template. Not saved.`);
+      throw new Error('Generated data failed to render with the current template. Not saved.');
     }
   } catch (error: any) {
     if (error.name !== 'AbortError') {
@@ -335,6 +360,7 @@ async function generateTracker(id: number) {
       st_echo('error', `Tracker generation failed: ${(error as Error).message}`);
     }
   } finally {
+    pendingRequests.delete(id);
     mainButton?.classList.remove('spinning');
     regenerateButton?.classList.remove('spinning');
   }
