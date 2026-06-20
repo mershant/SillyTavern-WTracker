@@ -590,7 +590,7 @@ async function initializeGlobalUI() {
     await modifyChatMetadata();
   });
 
-  // Set up event listeners for auto-mode and chat changes
+  // Set up event listeners for auto-mode and swipe rendering
   const settings = settingsManager.getSettings();
   globalContext.eventSource.on(
     EventNames.CHARACTER_MESSAGE_RENDERED,
@@ -605,32 +605,28 @@ async function initializeGlobalUI() {
   globalContext.eventSource.on(EventNames.MESSAGE_SWIPED, (messageId: number) => {
     renderTracker(messageId);
   });
-  globalContext.eventSource.on(EventNames.CHAT_CHANGED, () => {
-    const { saveChat } = globalContext;
-    let chatModified = false;
-    globalContext.chat.forEach((message, i) => {
+
+  const renderAllTrackers = () => {
+    globalContext.chat.forEach((_, i) => {
       try {
         renderTracker(i);
       } catch (error) {
         console.error(`Error rendering WTracker on message ${i}, removing active swipe tracker:`, error);
         st_echo('error', 'A WTracker template failed to render. Removing tracker from the active swipe.');
+        const message = globalContext.chat[i];
         if (getTrackerForActiveSwipe(message)) {
           deleteTrackerForActiveSwipe(message);
-          chatModified = true;
         }
       }
     });
-    if (chatModified) {
-      saveChat();
-    }
-  });
-
-  // Register the global generation interceptor
-  (globalThis as any).wtrackerGenerateInterceptor = (chat: ChatMessage[]) => {
-    const newChat = includeWTrackerMessages(chat, settingsManager.getSettings());
-    chat.length = 0;
-    chat.push(...newChat);
   };
+
+  setTimeout(renderAllTrackers, 0);
+
+  // Register the global generation interceptor as a no-op.
+  // WTracker renders and generates trackers after messages/swipes, so it doesn't
+  // need to mutate the chat array during generation.
+  (globalThis as any).wtrackerGenerateInterceptor = () => {};
 }
 
 async function modifyChatMetadata() {

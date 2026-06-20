@@ -147,18 +147,6 @@ export const WTrackerSettings: FC = () => {
         <div className="inline-drawer-content">
           <div className="wtracker-container">
             <div className="setting-row">
-              <label>Connection Profile</label>
-              <STConnectionProfileSelect
-                initialSelectedProfileId={settings.profileId}
-                onChange={(profile) =>
-                  updateAndRefresh((s) => {
-                    s.profileId = profile?.id ?? '';
-                  })
-                }
-              />
-            </div>
-
-            <div className="setting-row">
               <label>Connection Source</label>
               <select
                 className="text_pole"
@@ -174,9 +162,24 @@ export const WTrackerSettings: FC = () => {
               </select>
             </div>
 
-            <div className="setting-row">
-              <label>OpenAI Compatible</label>
-              <div className="summaryception-sub-panel" style={{ display: 'block' }}>
+            {settings.connectionSource === 'profile' && (
+              <div className="setting-row">
+                <label>Connection Profile</label>
+                <STConnectionProfileSelect
+                  initialSelectedProfileId={settings.profileId}
+                  onChange={(profile) =>
+                    updateAndRefresh((s) => {
+                      s.profileId = profile?.id ?? '';
+                    })
+                  }
+                />
+              </div>
+            )}
+
+            {settings.connectionSource === 'openai' && (
+              <div className="setting-row">
+                <label>OpenAI Compatible</label>
+                <div className="summaryception-sub-panel" style={{ display: 'block' }}>
                 <div className="summaryception-setting-row">
                   <label>Endpoint URL</label>
                   <input
@@ -236,8 +239,9 @@ export const WTrackerSettings: FC = () => {
                   />
                 </div>
                 <small className="summaryception-help-text">Direct OpenAI-compatible transport. Faster on lightweight providers, with streaming + client-side parsing.</small>
+                </div>
               </div>
-            </div>
+            )}
 
             <div className="setting-row">
               <label>Auto Mode</label>
