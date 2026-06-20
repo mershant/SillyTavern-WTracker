@@ -19,6 +19,10 @@ function isAbortError(error: unknown): boolean {
     : error instanceof Error && error.name === 'AbortError';
 }
 
+function isNonRetryableError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as any).retryable === false;
+}
+
 export async function runWithRetry<T>(
   modes: GenerationMode[],
   retryCount: number,
@@ -36,7 +40,7 @@ export async function runWithRetry<T>(
         return { value, modeUsed: mode, attempts };
       } catch (error) {
         lastError = error;
-        if (isAbortError(error)) {
+        if (isAbortError(error) || isNonRetryableError(error)) {
           throw error;
         }
       }

@@ -10,14 +10,16 @@ import { ExtensionSettings, PromptEngineeringMode, EXTENSION_KEY, extensionName 
 import { parseResponse } from './parser.js';
 import { schemaToExample } from './schema-to-example.js';
 import { buildModeSequence, runWithRetry } from './generation.js';
+import { buildOpenAIChatCompletionsUrl, isLocalOpenAIEndpoint } from './openai-compat.js';
 import {
   deleteTrackerForActiveSwipe,
   getTrackerForActiveSwipe,
   setTrackerForActiveSwipe,
   shouldAutoGenerateForRenderType,
 } from './tracker-state.js';
-import * as Handlebars from 'handlebars';
+
 import { POPUP_RESULT, POPUP_TYPE } from 'sillytavern-utils-lib/types/popup';
+import * as Handlebars from 'handlebars';
 
 // --- Constants and Globals ---
 const CHAT_METADATA_SCHEMA_PRESET_KEY = 'schemaKey';
@@ -232,6 +234,148 @@ function buildPromptForMode(
   return { messages };
 }
 
+function buildDirectOpenAIBaseMessages(id: number, settings: ExtensionSettings): Message[] {
+  const start = settings.includeLastXMessages > 0 ? Math.max(0, id - settings.includeLastXMessages) : 0;
+  return includeWTrackerMessages(globalContext.chat.slice(start, id + 1) as any, settings) as Message[];
+}
+
+function toOpenAIMessages(requestMessages: Message[]): Array<{ role: string; content: string }> {
+  return requestMessages
+    .map((message) => ({
+      role: (message.role ?? 'user') as string,
+      content: typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
+    }))
+    .filter((message) => message.content.trim().length > 0);
+}
+
+async function sendViaOpenAICompatible(
+  settings: ExtensionSettings,
+  requestMessages: Message[],
+  signal: AbortSignal,
+): Promise<string> {
+  if (!settings.openaiUrl?.trim()) {
+    throw Object.assign(new Error('OpenAI Compatible URL is not configured. Please set it in settings.'), {
+      retryable: false,
+    });
+  }
+  if (!settings.openaiModel?.trim()) {
+    throw Object.assign(new Error('OpenAI Compatible model is not set. Please enter one in settings.'), {
+      retryable: false,
+    });
+  }
+
+  const endpoint = buildOpenAIChatCompletionsUrl(settings.openaiUrl);
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (settings.openaiKey?.trim()) {
+    headers.Authorization = `Bearer ${settings.openaiKey.trim()}`;
+  }
+
+  const body: Record<string, any> = {
+    model: settings.openaiModel.trim(),
+    messages: toOpenAIMessages(requestMessages),
+    temperature: 0.8,
+    stream: true,
+  };
+  if (settings.openaiMaxTokens > 0) {
+    body.max_tokens = settings.openaiMaxTokens;
+  }
+
+  const fetchWithMaybeProxy = async (url: string): Promise<Response> => {
+    const useProxy = isLocalOpenAIEndpoint(url) && globalContext?.getRequestHeaders;
+    if (useProxy) {
+      try {
+        return await fetch(`/proxy/${url}`, {
+          method: 'POST',
+          headers: { ...globalContext.getRequestHeaders(), ...headers },
+          body: JSON.stringify(body),
+          signal,
+        });
+      } catch (proxyError: any) {
+        console.warn('[WTracker] OpenAI proxy failed, trying direct:', proxyError?.message || proxyError);
+      }
+    }
+
+    return fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    });
+  };
+
+  let response: Response;
+  try {
+    response = await fetchWithMaybeProxy(endpoint);
+  } catch (error: any) {
+    throw Object.assign(new Error(`OpenAI Compatible request failed: ${error?.message || String(error)}`), {
+      retryable: true,
+    });
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => 'Unknown error');
+    if (response.status === 401 || response.status === 403) {
+      throw Object.assign(new Error(`OpenAI Compatible auth failed (${response.status}): ${errorText}`), {
+        retryable: false,
+        status: response.status,
+      });
+    }
+    throw Object.assign(new Error(`OpenAI Compatible request failed (${response.status}): ${errorText}`), {
+      retryable: response.status >= 500 || response.status === 429,
+      status: response.status,
+    });
+  }
+
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    const text = await response.text();
+    if (!text.trim()) {
+      throw Object.assign(new Error('OpenAI Compatible endpoint returned an empty response.'), {
+        retryable: true,
+      });
+    }
+    return text;
+  }
+
+  const decoder = new TextDecoder();
+  let fullContent = '';
+  let buffer = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data:')) continue;
+        const data = trimmed.slice(5).trim();
+        if (data === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(data);
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) fullContent += delta;
+        } catch {
+          // skip non-json chunks
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (!fullContent.trim()) {
+    throw Object.assign(new Error('OpenAI Compatible endpoint returned an empty response.'), {
+      retryable: true,
+    });
+  }
+
+  return fullContent;
+}
+
 async function requestTrackerGeneration(
   id: number,
   settings: ExtensionSettings,
@@ -241,6 +385,11 @@ async function requestTrackerGeneration(
   const abortController = pendingRequests.get(id);
   if (!abortController) {
     throw new DOMException('Request aborted by user', 'AbortError');
+  }
+
+  if (settings.connectionSource === 'openai') {
+    const text = await sendViaOpenAICompatible(settings, requestMessages, abortController.signal);
+    return { content: text };
   }
 
   const result = await globalContext.ConnectionManagerRequestService.sendRequest(
@@ -283,7 +432,12 @@ async function generateTracker(id: number) {
   }
 
   const settings = settingsManager.getSettings();
-  if (!settings.profileId) return st_echo('error', 'Please select a connection profile in settings.');
+  if (settings.connectionSource === 'profile' && !settings.profileId) {
+    return st_echo('error', 'Please select a connection profile in settings.');
+  }
+  if (settings.connectionSource === 'openai' && !settings.openaiUrl.trim()) {
+    return st_echo('error', 'Please set an OpenAI Compatible endpoint in settings.');
+  }
   const context = SillyTavern.getContext();
   const chatMetadata = context.chatMetadata;
   const { extensionSettings, CONNECT_API_MAP, saveChat } = globalContext;
@@ -317,19 +471,26 @@ async function generateTracker(id: number) {
     mainButton?.classList.add('spinning');
     regenerateButton?.classList.add('spinning');
 
-    const promptResult = await buildPrompt(apiMap?.selected!, {
-      targetCharacterId: characterId,
-      messageIndexesBetween: {
-        end: id,
-        start: settings.includeLastXMessages > 0 ? Math.max(0, id - settings.includeLastXMessages) : 0,
-      },
-      presetName: profile?.preset,
-      contextName: profile?.context,
-      instructName: profile?.instruct,
-      syspromptName: profile?.sysprompt,
-      includeNames: !!((globalContext as any).groupId),
-    });
-    const baseMessages = includeWTrackerMessages(promptResult.result, settings);
+    const baseMessages =
+      settings.connectionSource === 'openai'
+        ? buildDirectOpenAIBaseMessages(id, settings)
+        : includeWTrackerMessages(
+            (
+              await buildPrompt(apiMap?.selected!, {
+                targetCharacterId: characterId,
+                messageIndexesBetween: {
+                  end: id,
+                  start: settings.includeLastXMessages > 0 ? Math.max(0, id - settings.includeLastXMessages) : 0,
+                },
+                presetName: profile?.preset,
+                contextName: profile?.context,
+                instructName: profile?.instruct,
+                syspromptName: profile?.sysprompt,
+                includeNames: !!((globalContext as any).groupId),
+              })
+            ).result,
+            settings,
+          );
     const modeSequence = buildModeSequence(settings.promptEngineeringMode, settings.fallbackNativeToJson);
 
     const { value: response, modeUsed, attempts } = await runWithRetry(
@@ -347,7 +508,7 @@ async function generateTracker(id: number) {
     );
 
     if (modeUsed !== settings.promptEngineeringMode) {
-      st_echo('info', `WTracker native mode fell back to ${modeUsed.toUpperCase()} after ${attempts} attempt(s).`);
+      st_echo('info', `WTracker mode fell back to ${modeUsed.toUpperCase()} after ${attempts} attempt(s).`);
     }
 
     setTrackerForActiveSwipe(message, { value: response, html: chatHtmlValue });

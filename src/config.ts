@@ -14,10 +14,17 @@ export interface Schema {
   html: string;
 }
 
+export type ConnectionSource = 'profile' | 'openai';
+
 export interface ExtensionSettings {
   version: string;
   formatVersion: string;
   profileId: string;
+  connectionSource: ConnectionSource;
+  openaiUrl: string;
+  openaiKey: string;
+  openaiModel: string;
+  openaiMaxTokens: number;
   maxResponseToken: number;
   retryCount: number;
   autoMode: AutoModeOptions;
@@ -263,6 +270,11 @@ export const defaultSettings: ExtensionSettings = {
   version: VERSION,
   formatVersion: FORMAT_VERSION,
   profileId: '',
+  connectionSource: 'profile',
+  openaiUrl: '',
+  openaiKey: '',
+  openaiModel: '',
+  openaiMaxTokens: 0,
   maxResponseToken: 16000,
   retryCount: 2,
   autoMode: AutoModeOptions.NONE,

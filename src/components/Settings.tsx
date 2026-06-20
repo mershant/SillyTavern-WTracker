@@ -17,6 +17,7 @@ import {
   DEFAULT_SCHEMA_HTML,
   PromptEngineeringMode,
   PromptSenderRole,
+  ConnectionSource,
   defaultSettings,
   EXTENSION_KEY,
 } from '../config.js';
@@ -155,6 +156,87 @@ export const WTrackerSettings: FC = () => {
                   })
                 }
               />
+            </div>
+
+            <div className="setting-row">
+              <label>Connection Source</label>
+              <select
+                className="text_pole"
+                value={settings.connectionSource}
+                onChange={(e) =>
+                  updateAndRefresh((s) => {
+                    s.connectionSource = e.target.value as ConnectionSource;
+                  })
+                }
+              >
+                <option value="profile">Connection Profile</option>
+                <option value="openai">OpenAI Compatible (fast)</option>
+              </select>
+            </div>
+
+            <div className="setting-row">
+              <label>OpenAI Compatible</label>
+              <div className="summaryception-sub-panel" style={{ display: 'block' }}>
+                <div className="summaryception-setting-row">
+                  <label>Endpoint URL</label>
+                  <input
+                    type="text"
+                    className="text_pole"
+                    value={settings.openaiUrl}
+                    onChange={(e) =>
+                      updateAndRefresh((s) => {
+                        s.openaiUrl = e.target.value;
+                      })
+                    }
+                    placeholder="https://api.openai.com/v1 or https://openrouter.ai/api/v1"
+                  />
+                </div>
+                <div className="summaryception-setting-row">
+                  <label>API Key</label>
+                  <input
+                    type="password"
+                    className="text_pole"
+                    value={settings.openaiKey}
+                    onChange={(e) =>
+                      updateAndRefresh((s) => {
+                        s.openaiKey = e.target.value;
+                      })
+                    }
+                    placeholder="optional"
+                    autoComplete="off"
+                  />
+                </div>
+                <div className="summaryception-setting-row">
+                  <label>Model</label>
+                  <input
+                    type="text"
+                    className="text_pole"
+                    value={settings.openaiModel}
+                    onChange={(e) =>
+                      updateAndRefresh((s) => {
+                        s.openaiModel = e.target.value;
+                      })
+                    }
+                    placeholder="gemini-3.5-flash or other OpenAI-compatible model id"
+                  />
+                </div>
+                <div className="summaryception-setting-row">
+                  <label>Max Tokens</label>
+                  <input
+                    type="number"
+                    className="text_pole"
+                    min="0"
+                    step="100"
+                    value={settings.openaiMaxTokens}
+                    onChange={(e) =>
+                      updateAndRefresh((s) => {
+                        s.openaiMaxTokens = parseInt(e.target.value) || 0;
+                      })
+                    }
+                  />
+                </div>
+                <small className="summaryception-help-text">Direct OpenAI-compatible transport. Faster on lightweight providers, with streaming + client-side parsing.</small>
+              </div>
             </div>
 
             <div className="setting-row">
